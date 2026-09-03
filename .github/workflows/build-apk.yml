@@ -13,12 +13,27 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@v4
 
-      - name: Build APK with Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          workdir: android
-          buildozer_version: stable
-          command: buildozer android debug
+          python-version: "3.11"
+
+      - name: Install Android build system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git zip unzip openjdk-17-jdk python3-pip python3-virtualenv \
+            autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
+            libtinfo6 cmake libffi-dev libssl-dev automake autopoint gettext
+
+      - name: Install Buildozer and Python build tools
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install buildozer cython==0.29.33 setuptools legacy-cgi
+
+      - name: Accept Android SDK licenses automatically and build
+        working-directory: android
+        run: |
+          yes | buildozer android debug
 
       - name: Upload APK as a downloadable artifact
         uses: actions/upload-artifact@v4
