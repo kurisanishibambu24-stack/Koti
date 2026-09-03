@@ -11,7 +11,7 @@ requirements = python3==3.11.8,hostpython3==3.11.8,flask,jinja2,werkzeug,markups
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET
+android.permissions = INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
 android.api = 33
 android.minapi = 24
 android.ndk_api = 24
