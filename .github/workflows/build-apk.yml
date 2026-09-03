@@ -1,0 +1,27 @@
+name: Build JobBot APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "android/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Build APK with Buildozer
+        uses: ArtemSBulgakov/buildozer-action@v2
+        with:
+          workdir: android
+          buildozer_version: stable
+          command: buildozer android debug
+
+      - name: Upload APK as a downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JobBot-apk
+          path: android/bin/*.apk
