@@ -1,15 +1,12 @@
 [app]
 title = JobBot
 package.name = jobbot
-package.domain = org.jobbot
+package.domain = org.kurisanishibambu
 source.dir = .
-source.include_exts = py,json,txt
+source.include_exts = py,json,txt,html,png
 version = 1.0
 
-# Pure-Python requirements only — no compiled/native packages, which is what
-# most commonly breaks Android builds. flask's own dependencies
-# (werkzeug, jinja2, click, itsdangerous, markupsafe) are pulled in with it.
-requirements = python3==3.11.8,hostpython3==3.11.8,flask,fpdf2,pypdf
+requirements = python3==3.11.8,hostpython3==3.11.8,flask,jinja2,werkzeug,markupsafe,itsdangerous,click,blinker,fpdf2,pypdf
 
 orientation = portrait
 fullscreen = 0
@@ -19,11 +16,8 @@ android.api = 33
 android.minapi = 24
 android.ndk_api = 24
 android.ndk = 25b
-android.archs = arm64-v8a,armeabi-v7a
+android.archs = arm64-v8a
 
-# This is the important bit: the webview bootstrap runs main.py as a
-# background service and shows a native WebView pointing at
-# http://127.0.0.1:5000 once the Flask server (in main.py) is up.
 p4a.bootstrap = webview
 
 [buildozer]
