@@ -9,7 +9,7 @@ version = 1.0
 # Pure-Python requirements only — no compiled/native packages, which is what
 # most commonly breaks Android builds. flask's own dependencies
 # (werkzeug, jinja2, click, itsdangerous, markupsafe) are pulled in with it.
-requirements = python3==3.11.8,flask,fpdf2,pypdf
+requirements = python3==3.11.8,hostpython3==3.11.8,flask,fpdf2,pypdf
 
 orientation = portrait
 fullscreen = 0
