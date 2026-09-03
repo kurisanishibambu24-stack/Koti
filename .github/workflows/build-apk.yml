@@ -1,10 +1,6 @@
 name: Build JobBot APK
 
-on:
-  workflow_dispatch:
-  push:
-    paths:
-      - "android/**"
+on: [push, workflow_dispatch]
 
 jobs:
   build:
