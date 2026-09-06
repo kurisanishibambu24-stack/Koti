@@ -1,3 +1,0 @@
-flask
-fpdf2
-pypdf
