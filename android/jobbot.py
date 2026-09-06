@@ -32,6 +32,7 @@ import smtplib
 import ssl
 import platform
 import unicodedata
+import secrets
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -51,7 +52,7 @@ except ImportError:
     PdfReader = None
 
 try:
-    from flask import Flask, render_template_string, request, redirect, url_for, jsonify
+    from flask import Flask, render_template_string, request, redirect, url_for, jsonify, session
 except ImportError:
     Flask = None
 
@@ -60,18 +61,94 @@ except ImportError:
 # PATHS & GLOBALS SETUP
 # ==========================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_DIR = os.path.join(BASE_DIR, "config")
-DATA_DIR = os.path.join(BASE_DIR, "data")
-OUT_DIR = os.path.join(BASE_DIR, "out")
-CVS_DIR = os.path.join(OUT_DIR, "cvs")
-ATTACHMENTS_DIR = os.path.join(DATA_DIR, "attachments")
-OWN_CV_DIR = os.path.join(DATA_DIR, "own_cv")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 
-DB_PATH = os.path.join(DATA_DIR, "jobbot.db")
-MASTER_CV_PATH = os.path.join(DATA_DIR, "master_cv.json")
-CONFIG_PATH = os.path.join(CONFIG_DIR, "settings.json")
-BLOCKLIST_PATH = os.path.join(DATA_DIR, "blocklist.txt")
+# --- Multi-profile support -------------------------------------------
+# JobBot originally stored everything (CV, jobs, settings) in one fixed
+# set of folders, for one person. The hosted version needs each friend's
+# data kept completely separate. Rather than threading a "profile"
+# parameter through every function, we track the *active* profile in a
+# contextvar: the CLI never touches it (so it always resolves to
+# "default", preserving old single-user behavior), while the Flask web
+# app sets it once per request from the signed session cookie.
+import contextvars
+_active_profile_var = contextvars.ContextVar("active_profile", default="default")
+
+def sanitize_profile_name(name: str) -> str:
+    """Turn whatever a person typed into a safe folder name."""
+    name = re.sub(r"[^A-Za-z0-9_-]", "_", (name or "").strip())[:40]
+    return name or "default"
+
+def set_active_profile(name: str) -> str:
+    clean = sanitize_profile_name(name)
+    _active_profile_var.set(clean)
+    return clean
+
+def get_active_profile() -> str:
+    return _active_profile_var.get()
+
+PROFILES_ROOT = os.path.join(BASE_DIR, "profiles")
+
+def _profile_dir() -> str:
+    return os.path.join(PROFILES_ROOT, get_active_profile())
+
+def _p(*parts) -> str:
+    """Join a path under the current profile's own private folder."""
+    return os.path.join(_profile_dir(), *parts)
+
+# These used to be fixed strings. They're now properties so every call
+# site automatically resolves against whichever profile is active right
+# now, without needing to change any of the code that uses them.
+class _ProfilePaths:
+    @property
+    def CONFIG_DIR(self): return _p("config")
+    @property
+    def DATA_DIR(self): return _p("data")
+    @property
+    def OUT_DIR(self): return _p("out")
+    @property
+    def CVS_DIR(self): return _p("out", "cvs")
+    @property
+    def ATTACHMENTS_DIR(self): return _p("data", "attachments")
+    @property
+    def OWN_CV_DIR(self): return _p("data", "own_cv")
+    @property
+    def DB_PATH(self): return _p("data", "jobbot.db")
+    @property
+    def MASTER_CV_PATH(self): return _p("data", "master_cv.json")
+    @property
+    def CONFIG_PATH(self): return _p("config", "settings.json")
+    @property
+    def BLOCKLIST_PATH(self): return _p("data", "blocklist.txt")
+
+_paths = _ProfilePaths()
+
+class _DynamicPath(os.PathLike):
+    """A path that re-resolves itself against whichever profile is
+    active right now, every time it's used. Works anywhere a normal
+    path string works (os.path.*, open(), Path(), sqlite3.connect(),
+    f-strings) because Python calls __fspath__/__str__ fresh each time
+    rather than reading a value stored once at import time."""
+    def __init__(self, resolver):
+        self._resolver = resolver
+    def __fspath__(self):
+        return self._resolver()
+    def __str__(self):
+        return self._resolver()
+    def __repr__(self):
+        return self._resolver()
+
+CONFIG_DIR = _DynamicPath(lambda: _paths.CONFIG_DIR)
+DATA_DIR = _DynamicPath(lambda: _paths.DATA_DIR)
+OUT_DIR = _DynamicPath(lambda: _paths.OUT_DIR)
+CVS_DIR = _DynamicPath(lambda: _paths.CVS_DIR)
+ATTACHMENTS_DIR = _DynamicPath(lambda: _paths.ATTACHMENTS_DIR)
+OWN_CV_DIR = _DynamicPath(lambda: _paths.OWN_CV_DIR)
+DB_PATH = _DynamicPath(lambda: _paths.DB_PATH)
+MASTER_CV_PATH = _DynamicPath(lambda: _paths.MASTER_CV_PATH)
+CONFIG_PATH = _DynamicPath(lambda: _paths.CONFIG_PATH)
+BLOCKLIST_PATH = _DynamicPath(lambda: _paths.BLOCKLIST_PATH)
+
 
 # CV Engine Styling Constants
 FONT = "Helvetica"
@@ -2239,79 +2316,59 @@ def build_flask_app():
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
-    HTML_TEMPLATE = """
+    # A random key per process is fine here: it only needs to keep this
+    # session's cookie tamper-proof, not survive a server restart. If
+    # JobBot is later run across multiple worker processes behind a real
+    # host, set this from a fixed environment variable instead so every
+    # worker verifies the same cookies.
+    app.secret_key = os.environ.get("JOBBOT_SECRET_KEY", secrets.token_hex(32))
+
+    LOGIN_TEMPLATE = """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>JobBot Dashboard</title>
+        <title>JobBot</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            :root {
-                --bg: #0b1220; --bg-soft: #0f1b30; --card: #142238; --card-border: #1f3358;
-                --accent: #3b82f6; --accent-dark: #1d4ed8; --accent-soft: #1e3a8a;
-                --text: #e6edf7; --text-dim: #93a4c3; --danger: #ef4444; --warn: #f59e0b; --ok: #22c55e;
-            }
+            :root { --bg: #0b1220; --bg-soft: #0f1b30; --card: #142238; --card-border: #1f3358;
+                    --accent: #3b82f6; --accent-dark: #1d4ed8; --text: #e6edf7; --text-dim: #93a4c3; }
             * { box-sizing: border-box; }
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 24px; background: linear-gradient(180deg, var(--bg) 0%, var(--bg-soft) 100%); color: var(--text); min-height: 100vh; }
-            h1 { color: var(--text); font-weight: 700; letter-spacing: -0.02em; display:flex; align-items:center; gap:10px; margin-bottom: 4px; }
-            h3 { color: var(--text); margin-bottom: 4px; }
-            a { color: var(--accent); }
-            .card { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 4px 14px rgba(0,0,0,0.25); }
-            .btn { background: var(--accent); color: white; padding: 9px 16px; border: none; border-radius: 8px; text-decoration: none; cursor: pointer; display:inline-block; margin: 3px 4px 3px 0; font-size: 14px; font-weight: 600; transition: background 0.15s ease; }
-            .btn:hover { background: var(--accent-dark); }
-            .btn-danger { background: var(--danger); }
-            .btn-blue { background: var(--accent-dark); }
-            .btn-grey { background: #2b3b57; color: var(--text-dim); }
-            .btn-outline { background: transparent; color: var(--text-dim); border: 1px solid var(--card-border); }
-            .badge { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; background: #1f2f4a; color: var(--text-dim); margin: 2px 4px 2px 0; }
-            .badge-scam { background: rgba(239,68,68,0.15); color: #f87171; }
-            .badge-match { background: rgba(34,197,94,0.15); color: #4ade80; }
-            .badge-cv { background: rgba(59,130,246,0.18); color: #93c5fd; }
-            .badge-warn { background: rgba(245,158,11,0.15); color: #fbbf24; }
-            .note { background: rgba(59,130,246,0.08); border: 1px solid var(--accent-soft); padding: 12px 16px; border-radius: 10px; font-size: 14px; color: var(--text-dim); }
-            textarea { width: 100%; min-height: 340px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; padding: 10px; background: var(--bg-soft); color: var(--text); border: 1px solid var(--card-border); border-radius: 8px; }
-            input[type=text] { width: 100%; padding: 9px; font-size: 14px; background: var(--bg-soft); color: var(--text); border: 1px solid var(--card-border); border-radius: 8px; }
-            code { background: rgba(59,130,246,0.12); color: #93c5fd; padding: 1px 5px; border-radius: 4px; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                   margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+                   background: linear-gradient(180deg, var(--bg) 0%, var(--bg-soft) 100%); color: var(--text); padding: 24px; }
+            .card { background: var(--card); border: 1px solid var(--card-border); border-radius: 14px;
+                    padding: 28px 24px; max-width: 340px; width: 100%; }
+            h1 { font-size: 20px; margin: 0 0 4px; }
+            p { color: var(--text-dim); font-size: 14px; margin: 0 0 20px; }
+            input[type=text] { width: 100%; padding: 11px; font-size: 15px; background: var(--bg-soft);
+                    color: var(--text); border: 1px solid var(--card-border); border-radius: 8px; margin-bottom: 12px; }
+            button { width: 100%; background: var(--accent); color: white; padding: 11px; border: none;
+                    border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; }
+            button:hover { background: var(--accent-dark); }
+            .err { color: #f87171; font-size: 13px; margin: -6px 0 12px; }
         </style>
     </head>
     <body>
-        <h1>💙 JobBot Dashboard</h1>
-        <p class="note">
-            <strong>Active filters on `fetch`:</strong> Baseline requirement filter is always on
-            (Grade 12 / Matric / NCV Level 4 or equivalent, OR Driver's Licence or equivalent).
-            Province filter is chosen each time you run <code>jobbot fetch</code>.<br>
-            <strong>Sending throttle:</strong> {{ delay }}s (+0-{{ jitter }}s random) between emails, max {{ max_per_run }} per run.<br>
-            <strong>Own CV file:</strong> {{ own_cv or 'none uploaded yet' }} &nbsp; <a href="/own-cv">upload / change</a>
-        </p>
-        <p>
-            <a href="/send" class="btn">Process &amp; Dispatch Selected Jobs</a>
-            <a href="/own-cv" class="btn btn-grey">Upload Own CV</a>
-        </p>
-        <div>
-            {% for job in jobs %}
-            <div class="card">
-                <h3>{{ job.title }} - <small style="color:var(--text-dim);">{{ job.company or 'Unknown' }}</small></h3>
-                <p style="color:var(--text-dim);"><strong style="color:var(--text);">Location:</strong> {{ job.location }} | <strong style="color:var(--text);">Contact:</strong> {{ job.contact_email or 'N/A' }}</p>
-                <p>
-                    <span class="badge badge-match">Match: {{ job.match_score }}%</span>
-                    <span class="badge badge-scam">Scam Risk: {{ job.scam_score }}%</span>
-                    <span class="badge">Status: {{ job.status }}</span>
-                    {% if job.cv_mode == 'custom' %}
-                        <span class="badge badge-cv">CV: custom ats cv</span>
-                    {% elif job.cv_mode == 'own' %}
-                        <span class="badge badge-cv">CV: own cv</span>
-                    {% else %}
-                        <span class="badge badge-warn">CV: not chosen yet</span>
-                    {% endif %}
-                    {% if job.email_edited %}<span class="badge badge-cv">Email: edited by you</span>
-                    {% elif job.email_body %}<span class="badge">Email: auto-draft</span>
-                    {% else %}<span class="badge badge-warn">Email: none yet</span>{% endif %}
-                </p>
-                <p><strong>Choose the CV for this job:</strong><br>
-                    <a href="/mode/{{ job.uid }}/custom" class="btn {% if job.cv_mode != 'custom' %}btn-outline{% endif %}">custom ats cv</a>
-                    <a href="/mode/{{ job.uid }}/own" class="btn {% if job.cv_mode != 'own' %}btn-outline{% endif %}">own cv</a>
-                </p>
-                <p>
-                    <a href="/email/{{ job.uid }}" class="btn btn-blue">View / Edit Email</a>
-                    <a href="/regen/{{ job.uid }}" class="btn btn-grey">Regenerate Email</a>
-                    <a href="/toggle/{{ job.uid }}" class="btn {% if job.selecte
+        <div class="card">
+            <h1>💙 JobBot</h1>
+            <p>Enter a name to start your own private job search. No password needed — your data is kept separate from everyone else who uses this.</p>
+            {% if error %}<p class="err">{{ error }}</p>{% endif %}
+            <form method="post">
+                <input type="text" name="profile_name" placeholder="e.g. your first name" autofocus>
+                <button type="submit">Continue</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        error = None
+        if request.method == "POST":
+            raw = request.form.get("profile_name", "")
+            clean = sanitize_profile_name(raw)
+            if not raw.strip():
+                error = "Enter a name first."
+            else:
+                session["
